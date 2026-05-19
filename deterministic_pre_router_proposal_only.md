@@ -343,93 +343,11 @@ if os.getenv("CHAT_PRE_ROUTER_ENABLED", "0") == "1":
 
 ---
 
-### 7. Extend telemetry
-
-Add fields that make router savings measurable.
-
-In plan logs, include:
-
-```json
-{
-  "route_source": "deterministic_pre_router",
-  "pre_router_reason": "ack_or_thanks",
-  "router_skipped": true,
-  "router_ms_saved_estimate": 700,
-  "model_router_called": false
-}
-```
-
-For normal model-router turns:
-
-```json
-{
-  "route_source": "model_router",
-  "router_skipped": false,
-  "model_router_called": true
-}
-```
-
-In the existing turn-budget log, add:
-
-```text
-route_source=%s pre_router_reason=%s
-```
-
-This lets us answer three important questions from logs:
-
-1. What percentage of turns skip the router?
-2. Which deterministic categories produce the most savings?
-3. Did skipped turns have lower thumbs-up or higher retry/edit rates?
+---
 
 ---
 
-### 8. Add tests
-
-Add a new test file:
-
-```text
-tests/test_chat_pre_router.py
-```
-
-Core unit tests:
-
-```python
-def test_greeting_returns_shallow_flash_plan(): ...
-def test_ack_returns_shallow_flash_plan(): ...
-def test_short_rewrite_returns_shallow_flash_plan(): ...
-def test_deep_followup_requires_prior_assistant_answer(): ...
-def test_deep_followup_with_prior_answer_returns_deep_plan(): ...
-def test_company_interview_question_returns_interview_tool_plan(): ...
-def test_google_this_falls_through(): ...
-def test_concept_mechanism_returns_knowledge_tool_plan(): ...
-def test_ambiguous_prompt_returns_none(): ...
-```
-
-Router integration tests:
-
-```python
-def test_router_plan_skips_model_when_pre_router_hits(reg):
-    with patch.object(router, "_call_router_model") as spy:
-        plan = router.plan("thanks!", registry=reg)
-    assert not spy.called
-    assert plan.rationale.startswith("deterministic:")
-
-
-def test_router_plan_falls_through_when_pre_router_misses(reg):
-    with patch.object(router, "_call_router_model", return_value=router_json) as spy:
-        plan = router.plan("teach me raft leader election", registry=reg)
-    assert spy.called
-```
-
-Pipeline test:
-
-```python
-def test_pipeline_logs_pre_router_source_for_skipped_turn(...): ...
-```
-
----
-
-### 9. Add a benchmark script
+### 7. Add a benchmark script
 
 Create:
 
@@ -530,66 +448,6 @@ For tool-backed deterministic plans, the system still pays retrieval/tool latenc
 
 ---
 
-## Rollout plan
-
-### Phase 1: Direct-answer bypass only
-
-Enable:
-
-```bash
-CHAT_PRE_ROUTER_ENABLED=1
-CHAT_PRE_ROUTER_TOOLS_ENABLED=0
-```
-
-Allowed categories:
-
-```text
-- greeting
-- thanks / acknowledgement
-- short rewrite
-- history-backed deep follow-up
-```
-
-This is the safest phase because it does not choose tools.
-
-### Phase 2: Log-only tool plans
-
-Enable:
-
-```bash
-CHAT_PRE_ROUTER_LOG_ONLY=1
-CHAT_PRE_ROUTER_TOOLS_ENABLED=1
-```
-
-Record proposed tool plans but continue using the model router. Compare deterministic decisions against actual router decisions.
-
-Promote a category only when deterministic decisions match or improve model-router behavior on real traffic.
-
-### Phase 3: Deterministic tool routing for high-confidence patterns
-
-Enable tool bypasses for:
-
-```text
-- known company + interview-question intent -> get_interview_questions
-- explicit mechanism question -> get_knowledge_context
-```
-
-Keep all other tool decisions with the model router.
-
-### Phase 4: Tune from logs
-
-Every week, review:
-
-```text
-- top pre-router hit categories
-- pre-router miss examples that could be safely added
-- false-positive reports
-- thumbs-down/retry rate by route_source
-- p50/p95 TTFB change by route_source
-```
-
-Only add new deterministic rules when they are obvious and testable.
-
 ---
 
 ## Safety guardrails
@@ -612,14 +470,7 @@ Only add new deterministic rules when they are obvious and testable.
 [ ] Add company allowlist or DB-backed company-name cache
 [ ] Add feature flags
 [ ] Patch router.plan() to call pre_router before _call_router_model()
-[ ] Add route_source / pre_router_reason telemetry
-[ ] Add unit tests for pre_router
-[ ] Add router integration tests proving _call_router_model is skipped
-[ ] Add pipeline/logging test
 [ ] Add benchmark script
-[ ] Roll out direct-answer bypass first
-[ ] Run tool-routing in log-only mode
-[ ] Promote high-confidence tool rules after traffic validation
 ```
 
 ---
