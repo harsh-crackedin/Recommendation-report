@@ -1,174 +1,214 @@
 # CrackedIn Coding Corpus Database Report
 
-## 1. Purpose
+**Document purpose:** This report defines the MVP database structure for storing coding-platform activity inside CrackedIn.
 
-This report defines the MVP database design for storing coding-platform activity inside **CrackedIn**.
+**Scope:** Database model, integration with the existing CrackedIn user system, submission storage, sync state storage, and AI-readiness of the captured corpus.
 
-The selected approach is **Option A**, which adds only two new tables:
+**Current product direction:** Add two coding-corpus tables that attach external coding-platform data to existing CrackedIn users:
 
 1. `user_coding_profiles`
 2. `user_coding_submissions`
 
-These two tables will connect external coding-platform data to the existing CrackedIn user system, starting with LeetCode and later supporting other platforms such as GFG, Codeforces, coding courses, and internal practice environments.
+The system starts with LeetCode and remains flexible enough to support GFG, Codeforces, code courses, and native CrackedIn practice environments later.
 
-The focus of this report is database structure, integration with the current CrackedIn schema, and how the stored data will become usable for AI-driven user analysis and recommendations.
+---
+
+## 1. Executive Summary
+
+CrackedIn needs a database layer that can store a user's real coding history, not just solved-problem counts or profile summaries.
+
+The browser extension will import historical LeetCode submissions and continue capturing future submissions. The backend must store that data in a way that is:
+
+- connected to the existing CrackedIn user account,
+- simple enough for MVP implementation,
+- rich enough for AI analysis,
+- safe against duplicate ingestion,
+- flexible enough for future coding platforms,
+- compatible with full historical code archival.
+
+The selected database structure uses two new tables:
+
+| Table | Purpose |
+|---|---|
+| `user_coding_profiles` | Links a CrackedIn user to an external coding-platform account |
+| `user_coding_submissions` | Stores every submitted attempt, including code, verdict, language, runtime, memory, and metadata |
+
+This design keeps CrackedIn's current `users` table as the source of truth and adds a platform-agnostic coding corpus around it.
 
 ---
 
 ## 2. Existing CrackedIn Database Context
 
-CrackedIn already has a user-centered schema. The existing user table stores the main product identity: email, password hash, display name, LeetCode username, target companies, target role, account tier, authentication provider, and creation metadata.
+CrackedIn already has a user-centered database. The current user system should remain the root identity system.
 
-CrackedIn also already has problem-level and LeetCode-summary tables. These are useful for dashboards and existing product features, but they do not store full attempt-level history.
+The existing schema already contains concepts such as:
 
-The current schema can represent things like:
-
-- the user account,
-- target companies,
-- target role,
-- known LeetCode username,
-- shared problem metadata,
-- solved-problem relationships,
+- users,
+- problems,
+- solved-problem status,
 - LeetCode profile summaries,
 - topic summaries,
-- contest summaries.
+- contest history,
+- chat sessions,
+- chat messages.
 
-However, the current schema does not fully represent:
+The new coding-corpus tables should not replace these existing tables. They should extend the system by adding full submission-level history and code snapshots.
 
-- every submitted attempt,
-- failed submissions,
-- multiple attempts on the same problem,
-- historical code snapshots,
-- live future code snapshots,
-- runtime and memory per attempt,
-- testcase details per attempt,
-- compile/runtime error details,
-- source of capture, such as historical sync, live capture, or delta repair.
+The important distinction is:
 
-Therefore, the new extension data should **extend** the current CrackedIn user model instead of replacing it.
-
-The correct integration model is:
-
-| Existing CrackedIn area | Current role | New extension data role |
-|---|---|---|
-| `users` | Main CrackedIn user identity | Parent user record |
-| `problems` | Shared LeetCode problem metadata | Optional join target for LeetCode submissions |
-| `user_solved_problems` | Basic solved-problem status | Can be updated from submission history |
-| `user_lc_profiles` | Aggregate LeetCode profile snapshot | Can be refreshed from richer sync data |
-| `user_lc_topics` | Topic-level summary | Can remain a fast summary table |
-| `user_contest_history` | Contest-level history | Remains separate from submission corpus |
-| New `user_coding_profiles` | External platform account connection | Links user to LeetCode/GFG/etc. |
-| New `user_coding_submissions` | Full attempt-level corpus | Stores code, verdicts, metadata, and analysis inputs |
-
----
-
-## 3. Why Option A Is Best for MVP
-
-Option A uses two tables instead of a more normalized three- or four-table design.
-
-This is better for MVP because the first goal is not perfect long-term normalization. The first goal is to reliably capture, store, and use the user's complete coding corpus.
-
-A larger design would separate platform profiles, problems, submissions, code snapshots, sync jobs, and analytics summaries into separate tables. That may become useful later, but it adds complexity before the capture pipeline is fully stabilized.
-
-For MVP, the two-table design is better because:
-
-| Reason | Why it matters |
+| Existing data | What it represents |
 |---|---|
-| Faster implementation | Fewer migrations, fewer joins, simpler ingestion |
-| Easier debugging | One table for platform account, one table for submissions |
-| Supports full historical code storage | Code can be stored directly with each submission |
-| Works with existing CrackedIn users | No new auth/user model required |
-| Supports multiple platforms | Platform-specific details can live in flexible metadata fields |
-| Good enough for AI analysis | All code, verdict, topic, language, and timestamp data are queryable |
-| Easy to normalize later | Can split problems/code/sync-runs once usage grows |
+| User profile data | Who the CrackedIn user is |
+| Problem data | Shared coding-question metadata |
+| Solved-problem data | Whether a user solved a problem |
+| LeetCode profile summary | Aggregated stats from a profile |
+| New coding-submission data | Every actual coding attempt and code snapshot |
 
-The larger normalized schema should remain a future scale-up path, not the MVP starting point.
+The current system can tell that a user solved or attempted problems. The new system should explain **how** they attempted them, **what code** they wrote, **what failed**, and **how their submissions changed over time**.
 
 ---
 
-## 4. Chosen MVP Schema Overview
+## 3. Database Design Principle
 
-The two new tables are:
+The central database principle is:
 
-1. `user_coding_profiles`
-2. `user_coding_submissions`
+> Keep CrackedIn users as the source of truth, attach external coding identities to those users, and store every coding attempt as a submission record.
 
-### 4.1 `user_coding_profiles`
+This means:
 
-This table represents an external coding account connected to a CrackedIn user.
+- do not create a separate user system for coding platforms,
+- do not put every platform-specific field into the `users` table,
+- do not store only summary data,
+- do not rely only on solved-problem status,
+- do not treat LeetCode as the only long-term platform,
+- do not duplicate the same external submission multiple times.
 
-Examples:
+The model should support this relationship:
 
-| CrackedIn user | Platform | External username |
+```text
+CrackedIn user
+  -> connected coding profile
+      -> coding submissions
+```
+
+A single CrackedIn user may later connect several external coding accounts.
+
+Example:
+
+| CrackedIn user | Connected platform | External username |
 |---|---|---|
 | User 1 | LeetCode | harshsrivastava05 |
 | User 1 | GFG | harsh05 |
 | User 1 | Codeforces | harsh_cf |
-
-A user can connect one or more external coding profiles over time.
-
-This table should answer:
-
-- Which coding accounts has this CrackedIn user connected?
-- Which platform does each account belong to?
-- What is the external username or user ID?
-- Is sync currently enabled?
-- What phase is sync in?
-- When was the last successful sync?
-- Where should sync resume if interrupted?
-- What permissions/settings did the user choose?
-
-### 4.2 `user_coding_submissions`
-
-This table stores the actual coding corpus.
-
-Every row represents one submitted attempt from LeetCode or another platform.
-
-This table should answer:
-
-- What problem did the user attempt?
-- What code did they submit?
-- Which language did they use?
-- Was the result accepted or failed?
-- What kind of failure happened?
-- What was the runtime and memory usage?
-- When was it submitted?
-- Was it captured historically, live, or through delta repair?
-- What raw platform metadata is available for future analysis?
-
-This table is the core AI analysis dataset.
+| User 1 | CrackedIn practice | internal |
 
 ---
 
-# 5. Table 1: `user_coding_profiles`
+## 4. Final Table Set
 
-## 5.1 Purpose
+The MVP coding-corpus database layer contains two new tables.
 
-`user_coding_profiles` links a CrackedIn user to one external coding-platform identity.
+## 4.1 `user_coding_profiles`
 
-This table is needed because the existing `users` table should not be expanded every time a new coding platform is added.
+This table stores the connection between a CrackedIn user and one external coding-platform profile.
 
-The existing `users.leetcode_username` field can remain useful for backward compatibility and display, but the new platform-agnostic table should become the primary connection model for extension-based sync.
+It answers questions such as:
 
-## 5.2 Recommended Fields
+- Which LeetCode account belongs to this CrackedIn user?
+- Is the external account connected?
+- Is sync enabled?
+- What platform is this profile from?
+- What is the external username?
+- When was the last full sync?
+- When was the last delta sync?
+- Where should sync resume if interrupted?
+- What was the last sync error?
+
+This table is the account-connection and sync-state table.
+
+## 4.2 `user_coding_submissions`
+
+This table stores the actual submission corpus.
+
+It answers questions such as:
+
+- What problem did the user submit?
+- What code did the user write?
+- What language did they use?
+- Was the result accepted or failed?
+- What kind of failure happened?
+- What was the runtime?
+- What was the memory usage?
+- How many testcases passed?
+- Was this imported historically or captured live?
+- What raw platform metadata was available?
+
+This table is the main AI analysis table.
+
+---
+
+## 5. Why This Two-Table Structure Is Appropriate for MVP
+
+The two-table structure gives CrackedIn the fastest path to a useful product while preserving future scalability.
+
+It is appropriate for MVP because:
+
+| Reason | Explanation |
+|---|---|
+| Minimal schema change | Only two tables need to be added to the existing CrackedIn database |
+| Clean user integration | The current CrackedIn `users` table remains the root identity |
+| Easier ingestion | Extension data has a clear destination: profile data or submission data |
+| Easier debugging | Sync issues can be traced through one profile row and related submission rows |
+| Full code archival support | Every historical and future submission can store code directly |
+| Platform flexibility | LeetCode-specific and future platform-specific fields can coexist |
+| AI readiness | Attempt-level code, verdicts, language, topics, and timestamps are available in one corpus |
+| Future normalization path | Larger tables can be split out later without changing the product model |
+
+For MVP, the immediate value comes from reliably importing and using the corpus. Additional separation of problems, code blobs, sync runs, analysis caches, and event logs can be introduced later when scale or product requirements justify it.
+
+---
+
+# 6. Table: `user_coding_profiles`
+
+## 6.1 Purpose
+
+`user_coding_profiles` represents one external coding account connected to one CrackedIn user.
+
+A CrackedIn user may have zero, one, or many connected coding profiles.
+
+Examples:
+
+| user_id | platform | platform_username |
+|---|---|---|
+| 1 | leetcode | harshsrivastava05 |
+| 1 | gfg | harsh05 |
+| 1 | codeforces | harsh_cf |
+
+This table prevents the existing `users` table from becoming cluttered with platform-specific fields.
+
+The existing `users.leetcode_username` field can remain for backward compatibility or display, but the long-term source of truth for external coding accounts should be `user_coding_profiles`.
+
+---
+
+## 6.2 Recommended Fields
 
 | Field | Purpose |
 |---|---|
-| `id` | Internal primary key for this connected coding profile |
+| `id` | Internal primary key for the connected coding profile |
 | `user_id` | References the existing CrackedIn user |
-| `platform` | External platform name, such as `leetcode`, `gfg`, `codeforces`, `code_course` |
+| `platform` | External platform name, such as `leetcode`, `gfg`, `codeforces`, `code_course`, or `crackedin_practice` |
 | `platform_user_id` | External platform's user ID if available |
 | `platform_username` | External platform username or handle |
-| `platform_display_name` | External profile display name if different from username |
+| `platform_display_name` | External display name if available |
 | `platform_profile_url` | Public or user-facing profile URL |
 | `is_connected` | Whether this account is currently connected |
 | `sync_enabled` | Whether automatic sync is enabled |
-| `sync_mode` | Sync mode; MVP default should be `full_archive` |
-| `sync_status` | Current status: idle, syncing, paused, failed, complete |
+| `sync_mode` | Sync behavior for this profile; MVP default is full archive |
+| `sync_status` | Current sync state |
 | `last_full_sync_at` | Last completed historical sync timestamp |
 | `last_delta_sync_at` | Last periodic repair sync timestamp |
 | `last_live_capture_at` | Last successful live-captured submission timestamp |
-| `sync_cursor` | Resumable sync state, stored as structured JSON/text |
+| `sync_cursor` | Resumable sync state |
 | `sync_error` | Last sync error message, if any |
 | `settings` | User/platform-specific sync settings |
 | `raw_profile` | Sanitized raw profile metadata from the platform |
@@ -177,80 +217,94 @@ The existing `users.leetcode_username` field can remain useful for backward comp
 
 ---
 
-## 5.3 Field Behavior
+## 6.3 Field Details
 
 ### `user_id`
 
-This is the main integration point with CrackedIn.
-
-Every coding profile must belong to one existing CrackedIn user.
+This field connects the external platform profile to the existing CrackedIn user.
 
 Relationship:
 
-| Parent | Child |
-|---|---|
-| `users.id` | `user_coding_profiles.user_id` |
+```text
+users.id -> user_coding_profiles.user_id
+```
 
-This ensures there is no duplicate user identity system.
+This keeps CrackedIn's existing authentication and account system intact.
+
+---
 
 ### `platform`
 
-This makes the table future-proof.
+This field identifies where the profile came from.
 
 Initial value:
 
-| Platform | Meaning |
+| Value | Meaning |
 |---|---|
-| `leetcode` | LeetCode synced through browser extension |
+| `leetcode` | LeetCode account synced through the browser extension |
 
-Future values:
+Future values may include:
 
-| Platform | Meaning |
+| Value | Meaning |
 |---|---|
 | `gfg` | GeeksforGeeks |
 | `codeforces` | Codeforces |
-| `code_course` | Internal or external coding course platform |
+| `code_course` | Coding-course platform |
 | `crackedin_practice` | Native CrackedIn coding environment |
 
-The schema should not assume every platform behaves like LeetCode.
+The platform field is required because different platforms have different user IDs, problem IDs, submission formats, verdict names, and code-fetch mechanisms.
+
+---
 
 ### `platform_user_id`
 
-For LeetCode, this comes from the authenticated `userStatus` response.
+This stores the external platform's internal user ID if available.
 
-This is useful because usernames can sometimes change, while numeric or internal platform IDs are often more stable.
+For LeetCode, this comes from the authenticated user-status response.
+
+This field is useful because usernames can change, while platform user IDs are often more stable.
+
+---
 
 ### `platform_username`
 
-For LeetCode, this is the username shown in the user's profile.
+This stores the visible username or handle.
 
-This is useful for display, logs, support, and manual debugging.
+For LeetCode, this is the profile username.
+
+It is useful for:
+
+- display,
+- support,
+- debugging,
+- account reconnection,
+- manual verification.
+
+---
 
 ### `sync_mode`
 
-For MVP, the selected product behavior is:
+For the current implementation, the default sync behavior is:
 
-| Mode | Meaning |
-|---|---|
-| `full_archive` | Store code for every historical submission |
+```text
+full_archive
+```
 
-Even though MVP will default to full archive, keeping this field is useful because future modes may include:
+This means CrackedIn imports and stores code for every historical submission, not just accepted submissions or selected attempts.
 
-| Future mode | Meaning |
-|---|---|
-| `metadata_only` | Store attempts without code |
-| `smart_code` | Store selected high-signal code only |
-| `full_archive` | Store all historical and future code |
+Keeping `sync_mode` as a field gives the product flexibility later, even though MVP uses full archive by default.
+
+---
 
 ### `sync_status`
 
-This field helps the product and extension show the user what is happening.
+This field records where the sync currently is.
 
-Recommended statuses:
+Recommended values:
 
 | Status | Meaning |
 |---|---|
-| `not_started` | User connected but has not started sync |
+| `not_started` | Profile connected but sync has not started |
 | `metadata_syncing` | Historical metadata is being fetched |
 | `code_syncing` | Historical code snapshots are being fetched |
 | `live_enabled` | Historical sync is done and live capture is active |
@@ -259,49 +313,75 @@ Recommended statuses:
 | `failed` | Last sync failed |
 | `complete` | Full historical sync completed |
 
+This gives the frontend and extension enough state to display progress and resume safely.
+
+---
+
 ### `sync_cursor`
 
-This is important because browser extension sync can be interrupted.
+This field stores resumable sync state.
 
-The cursor should store resumable state such as:
+It is important because browser extension workers can stop during long-running jobs. Full historical sync may also be interrupted by browser shutdown, network failure, rate limiting, backend errors, or user pause.
 
-| Cursor item | Purpose |
+The cursor should be able to track:
+
+| Cursor data | Purpose |
 |---|---|
-| Current historical offset | Resume `submissionList` pagination |
-| Current code-fetch position | Resume full code archive |
-| Remaining submission IDs | Continue after service worker shutdown |
-| Phase name | Know whether sync is in metadata, code, live, or delta phase |
-| Last processed submission ID | Debugging and recovery |
-| Retry count | Avoid infinite loops |
+| Current sync phase | Metadata sync, code sync, delta repair, etc. |
+| Current historical offset | Resume paginated submission-list fetching |
+| Submission IDs discovered | Continue after metadata discovery |
+| Code-fetch progress | Resume all historical code archival |
+| Last processed submission ID | Debugging and retry recovery |
+| Retry count | Avoid repeated failing loops |
+| Total discovered submissions | Show progress |
+| Total processed submissions | Show progress |
 
-This allows the extension and backend to continue from the last safe point.
+This field can be structured JSON/text depending on the database engine.
 
 ---
 
-# 6. Table 2: `user_coding_submissions`
+### `raw_profile`
 
-## 6.1 Purpose
+This stores sanitized platform profile metadata.
 
-`user_coding_submissions` stores every coding attempt.
+For LeetCode, this may include:
 
-For LeetCode, every row represents one LeetCode submission ID.
+- username,
+- user ID,
+- avatar URL,
+- real/display name if available,
+- premium flag if available,
+- profile ranking,
+- public summary stats.
 
-This includes:
+Do not store credentials, cookies, raw headers, or unrelated browser data.
+
+---
+
+# 7. Table: `user_coding_submissions`
+
+## 7.1 Purpose
+
+`user_coding_submissions` stores every submitted coding attempt.
+
+For LeetCode, one row corresponds to one LeetCode submission ID.
+
+This table stores:
 
 - historical submissions,
-- future live submissions,
-- accepted attempts,
-- failed attempts,
-- compile errors,
-- runtime errors,
-- time limit exceeded attempts,
-- multiple attempts on the same problem.
+- live future submissions,
+- accepted submissions,
+- failed submissions,
+- multiple attempts on the same problem,
+- code snapshots,
+- judge details,
+- platform metadata.
 
-This is the most important table for AI analysis.
+This table is the core user coding corpus.
 
 ---
 
-## 6.2 Recommended Fields
+## 7.2 Recommended Fields
 
 | Field | Purpose |
 |---|---|
@@ -322,7 +402,7 @@ This is the most important table for AI analysis.
 | `code` | Final canonical submitted code snapshot |
 | `client_captured_code` | Code captured from editor/submit flow, if available |
 | `server_confirmed_code` | Code returned by official submission-details API |
-| `code_hash` | Hash of canonical code for dedup/change detection |
+| `code_hash` | Hash of canonical code for deduplication and change detection |
 | `code_capture_method` | How code was captured or reconciled |
 | `verdict` | Normalized verdict |
 | `raw_status` | Raw platform status text |
@@ -342,7 +422,7 @@ This is the most important table for AI analysis.
 | `compile_error` | Compile error message if available |
 | `submitted_at` | Timestamp when user submitted |
 | `captured_at` | Timestamp when CrackedIn captured it |
-| `capture_source` | Historical, live, or delta source |
+| `capture_source` | Historical sync, live capture, delta repair, or manual resync |
 | `is_historical_imported` | Whether this came from historical sync |
 | `is_live_captured` | Whether this came from live session capture |
 | `raw_submission_meta` | Sanitized raw metadata from submission-list response |
@@ -352,17 +432,19 @@ This is the most important table for AI analysis.
 
 ---
 
-## 6.3 Required Unique Constraint
+## 7.3 Required Uniqueness Rule
 
-The table must prevent duplicate submissions.
+Every platform submission must have one canonical row.
 
-The natural uniqueness rule is:
+The uniqueness rule should be:
 
-| Constraint | Purpose |
-|---|---|
-| `platform + platform_submission_id` | Ensures one row per external submission |
+```text
+platform + platform_submission_id
+```
 
-This matters because the same submission can be discovered multiple ways:
+This prevents duplicates when the same submission is discovered through multiple paths.
+
+The same submission can appear during:
 
 - historical sync,
 - live capture,
@@ -370,98 +452,87 @@ This matters because the same submission can be discovered multiple ways:
 - manual re-sync,
 - retry after failed upload.
 
-All ingestion should use upsert behavior, not blind insert behavior.
+All writes should behave as upserts.
 
 ---
 
-## 6.4 Why Store Both `user_id` and `coding_profile_id`
+## 7.4 Why Store Both `user_id` and `coding_profile_id`
 
-Technically, `coding_profile_id` can lead back to the user through `user_coding_profiles`.
+`coding_profile_id` already points to a connected profile, and that profile points to a user. However, submissions should also store `user_id` directly.
 
-However, storing `user_id` directly in `user_coding_submissions` is still recommended.
-
-Reason:
+This is recommended because:
 
 | Benefit | Explanation |
 |---|---|
-| Faster AI queries | Most analysis starts with “all submissions for this user” |
-| Simpler application logic | Backend does not need to join for every common query |
-| Easier authorization | API can verify `submission.user_id` directly |
-| Better indexing | User-level submission queries become straightforward |
+| Faster AI queries | Most AI analysis starts with all submissions for one user |
+| Simpler authorization | The backend can verify submission ownership directly |
+| Easier dashboards | User-level submission queries do not always need joins |
+| Better indexing | Queries by user, time, verdict, topic, and language become simpler |
 
-The ingestion layer should ensure the `user_id` matches the owner of the `coding_profile_id`.
-
----
-
-# 7. Problem Metadata Strategy
-
-CrackedIn already has a problem table for LeetCode-style problem metadata.
-
-For LeetCode submissions, `problem_slug` in `user_coding_submissions` can be used to connect to the existing problem metadata.
-
-However, for MVP, this connection should be optional rather than mandatory.
-
-Reason:
-
-- LeetCode data can be matched by slug.
-- Other platforms may not share the same problem model.
-- GFG and coding courses may have different IDs, URLs, and topic structures.
-- Some submitted code may come from non-LeetCode environments.
-- Requiring a problem-row match during ingestion can make sync fragile.
-
-Recommended MVP approach:
-
-| Field | Purpose |
-|---|---|
-| `problem_slug` | Primary platform-level problem key |
-| `problem_title` | Display and AI context |
-| `problem_external_id` | Platform-specific problem ID |
-| `problem_frontend_id` | Display number, such as LeetCode number |
-| `problem_url` | Direct link |
-| `difficulty` | Useful for analysis |
-| `topic_tags` | Useful for recommendations |
-
-Later, a separate `coding_problems` table can be added if multi-platform problem normalization becomes important.
+The ingestion layer must ensure that `user_id` matches the owner of the `coding_profile_id`.
 
 ---
 
 # 8. Code Storage Strategy
 
-Since the product decision is to store all historical code, `user_coding_submissions` should include code fields directly in MVP.
+The current product decision is to store all historical code.
 
-The table should distinguish three code-related concepts:
+Therefore, the submission table should include code fields directly for MVP.
+
+There are three code concepts:
 
 | Field | Meaning |
 |---|---|
-| `client_captured_code` | Code captured during live submit/editor flow |
-| `server_confirmed_code` | Code returned by official platform details endpoint |
+| `client_captured_code` | Code captured from the editor or submit payload during live capture |
+| `server_confirmed_code` | Code returned by the official submission-details source |
 | `code` | Canonical code used by CrackedIn |
 
-For historical sync, the canonical code will usually be the server-confirmed code from LeetCode submission details.
+## 8.1 Historical Sync
 
-For live capture, the extension may first store client-captured code, then update the row after server confirmation arrives.
+For historical sync:
+
+- `server_confirmed_code` is fetched from the platform's official submission-details response.
+- `code` should usually equal `server_confirmed_code`.
+- `client_captured_code` is usually null because the submission happened before extension installation.
+
+## 8.2 Live Capture
+
+For live capture:
+
+- the extension first captures `client_captured_code`,
+- then it detects the official submission ID,
+- then it fetches server-confirmed details,
+- then it updates `server_confirmed_code`,
+- then it sets or confirms canonical `code`.
+
+## 8.3 Conflict Handling
+
+If client-captured and server-confirmed code differ:
+
+- keep both values,
+- set `code` to the server-confirmed version,
+- record the mismatch through `code_capture_method`,
+- optionally mark the record for inspection or debugging.
 
 Recommended canonical rule:
 
-| Situation | Canonical `code` value |
+| Situation | Canonical `code` |
 |---|---|
-| Historical sync | Use server-confirmed code |
-| Live capture before judge result | Temporarily use client-captured code |
-| Live capture after details fetch | Replace or confirm with server-confirmed code |
-| Client/server mismatch | Prefer server-confirmed code, keep client code for debugging |
-| Detail fetch fails | Keep client code and mark record for delta repair |
-
-This gives CrackedIn both speed and correctness.
+| Historical sync | Server-confirmed code |
+| Live capture before server details | Client-captured code temporarily |
+| Live capture after server details | Server-confirmed code |
+| Client/server mismatch | Server-confirmed code |
+| Detail fetch failed | Client-captured code until delta repair succeeds |
 
 ---
 
 # 9. Verdict and Status Strategy
 
-The database should store both raw platform status and normalized verdict.
+The database should store both raw platform status and normalized CrackedIn verdict.
 
 ## 9.1 Raw Status
 
-`raw_status` preserves exactly what the platform returned.
+`raw_status` preserves the exact status text returned by the platform.
 
 Examples:
 
@@ -474,12 +545,15 @@ Examples:
 | Runtime Error |
 | Compile Error |
 | Output Limit Exceeded |
+| Internal Error |
+| Timeout |
+| Restrictions Failed |
 
-This is useful for debugging and future platform-specific handling.
+This is useful for debugging, future platform support, and status mapping updates.
 
 ## 9.2 Normalized Verdict
 
-`verdict` should use a smaller internal set.
+`verdict` should use a small internal vocabulary.
 
 Recommended values:
 
@@ -493,9 +567,9 @@ Recommended values:
 | `CE` | Compile Error |
 | `OLE` | Output Limit Exceeded |
 | `IE` | Internal Error |
-| `OTHER` | Unknown or unsupported status |
+| `OTHER` | Unknown or platform-specific status |
 
-This makes analytics easier across platforms.
+This makes AI analysis and dashboards easier across platforms.
 
 ---
 
@@ -512,267 +586,322 @@ Recommended `capture_source` values:
 | `delta_repair` | Found by periodic repair after being missed |
 | `manual_resync` | Imported during user-triggered re-sync |
 
-This lets CrackedIn understand data provenance.
+This tells CrackedIn how each record was discovered.
 
-A row may have multiple boolean flags too:
-
-| Field | Meaning |
-|---|---|
-| `is_historical_imported` | Seen during historical sync |
-| `is_live_captured` | Seen during live browser capture |
-
-A submission can technically be both live-captured and later seen in delta repair, so `capture_source` should represent original source while booleans or metadata can reflect later reconciliation.
+A submission may be touched multiple times. For example, a live-captured row may later be seen again by delta repair. The backend should update the existing row rather than insert a duplicate.
 
 ---
 
-# 11. Sync Integration With CrackedIn
+# 11. Problem Metadata Strategy
 
-## 11.1 Account Connection
+CrackedIn already has a shared problem table for LeetCode-style problems. The submission table should still store problem metadata directly because future platforms may not fit the same problem model.
 
-When the user connects LeetCode through the extension:
+Recommended submission-level fields:
 
-1. The extension checks the logged-in LeetCode user.
-2. CrackedIn maps that external account to the current logged-in CrackedIn user.
-3. A row is created or updated in `user_coding_profiles`.
-4. The profile's `platform` is set to `leetcode`.
-5. The profile's sync mode is set to `full_archive`.
-6. Historical sync begins.
+| Field | Purpose |
+|---|---|
+| `problem_slug` | Platform-level problem key |
+| `problem_title` | Display and AI context |
+| `problem_external_id` | Platform-specific problem ID |
+| `problem_frontend_id` | Display problem number |
+| `problem_url` | Direct link to problem |
+| `difficulty` | Easy, Medium, Hard, or platform-specific equivalent |
+| `topic_tags` | Topic tags for analysis |
 
-The current CrackedIn `users` table remains the root identity.
+For LeetCode, `problem_slug` can be matched against CrackedIn's existing problem slug data.
 
-## 11.2 Historical Sync Integration
+For future platforms, `platform + problem_slug` should be treated as the platform-specific problem identity.
 
-During historical sync:
+Do not require a submission to match the existing `problems` table during ingestion. Missing matches should not block sync.
 
-1. Extension collects all LeetCode submission IDs and metadata.
-2. CrackedIn creates or updates rows in `user_coding_submissions`.
-3. Each row is linked to the existing user and the connected coding profile.
-4. The extension fetches full details and code for every submission.
-5. Each submission row is updated with canonical code and judge details.
-6. `user_coding_profiles` stores progress and sync status.
+---
 
-The existing solved-problem relationship can optionally be updated from accepted submissions after sync, but it should not be the primary storage for the new corpus because it cannot represent full attempt history.
+# 12. Sync Integration With CrackedIn
 
-## 11.3 Live Capture Integration
+## 12.1 Account Connection
 
-During live capture:
+When a user connects LeetCode:
+
+1. The user is already authenticated in CrackedIn.
+2. The extension checks the logged-in LeetCode identity.
+3. CrackedIn creates or updates a `user_coding_profiles` row.
+4. The row links the CrackedIn user to the LeetCode account.
+5. Sync status is initialized.
+6. Historical sync starts.
+
+The existing CrackedIn user remains the parent account.
+
+---
+
+## 12.2 Historical Sync Integration
+
+Historical sync should use the profile row as the sync anchor.
+
+Flow:
+
+1. `user_coding_profiles` identifies the connected platform account.
+2. Extension walks historical submission metadata.
+3. Backend upserts each submission into `user_coding_submissions`.
+4. Extension fetches official details and code for every submission.
+5. Backend updates the same submission rows with code and judge details.
+6. Profile sync state is updated throughout.
+7. When complete, the profile row enters a completed or live-enabled state.
+
+---
+
+## 12.3 Live Capture Integration
+
+Live capture uses the same submission table.
+
+Flow:
 
 1. User submits code on LeetCode.
-2. Extension captures client-side code and submission context.
-3. Extension detects or receives the platform submission ID.
-4. CrackedIn creates or updates a `user_coding_submissions` row.
-5. The row initially may contain client-captured code.
-6. Extension fetches official submission details.
-7. CrackedIn updates the same row with server-confirmed code, verdict, runtime, memory, and testcase details.
+2. Extension captures client-side code and context.
+3. Extension detects the official submission ID.
+4. Backend upserts a `user_coding_submissions` row.
+5. Extension fetches official details.
+6. Backend updates the same row with server-confirmed code and judge result.
+7. Profile `last_live_capture_at` is updated.
 
-This requires idempotent upsert behavior because the same submission may be seen more than once.
-
-## 11.4 Delta Repair Integration
-
-Periodic delta repair should:
-
-1. Check recent submissions from the platform.
-2. Compare platform submission IDs against `user_coding_submissions`.
-3. Insert missing rows.
-4. Fetch missing code/details.
-5. Update `user_coding_profiles.last_delta_sync_at`.
-
-Delta repair protects the system from missed live submissions.
+This keeps historical and live submissions in one unified corpus.
 
 ---
 
-# 12. Relationship to Existing CrackedIn LeetCode Tables
+## 12.4 Delta Repair Integration
 
-The existing CrackedIn schema already includes LeetCode-oriented summary data. The new two-table design should coexist with it.
+Delta repair also writes to the same submission table.
 
-## 12.1 `users.leetcode_username`
+Flow:
 
-This can remain as a convenience/display field, but the canonical external platform mapping should move to `user_coding_profiles`.
+1. Extension or backend checks recent platform activity.
+2. Missing submission IDs are identified.
+3. Missing rows are inserted or updated.
+4. Official details are fetched.
+5. Profile `last_delta_sync_at` is updated.
 
-Reason:
-
-- `users.leetcode_username` supports only one platform-specific field.
-- `user_coding_profiles` supports many platforms.
-- A user may later connect multiple external coding identities.
-
-## 12.2 `user_lc_profiles`
-
-This table stores LeetCode profile summary data such as total solved, easy/medium/hard solved, submissions, contest rating, streak, active years, languages, beats stats, failed counts, ranking, and reputation.
-
-It should remain useful for profile-level dashboards.
-
-The new `user_coding_submissions` table is more granular and can eventually be used to refresh or validate this profile summary.
-
-## 12.3 `user_lc_topics`
-
-This table stores per-topic solve counts.
-
-It can remain as a fast dashboard/summary table.
-
-The new submission corpus will provide deeper inputs, including failed attempts and code quality by topic.
-
-## 12.4 `user_contest_history`
-
-This table stores contest-level performance.
-
-It does not overlap much with submission-level code storage, so it should remain separate.
-
-## 12.5 `problems`
-
-The existing `problems` table can be used for LeetCode joins by slug or LeetCode number.
-
-However, the new submission table should not require every record to match this table because future platforms may not use the same problem universe.
+This ensures missed live events are eventually captured.
 
 ---
 
-# 13. AI Data Use
+# 13. Relationship With Existing CrackedIn Tables
 
-The AI recommendation system will use `user_coding_submissions` as the user's real coding-history corpus.
+## 13.1 `users`
 
-This table gives the AI structured access to:
+`users` remains the source of truth for CrackedIn identity.
+
+The new tables attach to `users.id`.
+
+No separate coding-user identity should be created.
+
+---
+
+## 13.2 `users.leetcode_username`
+
+This field can remain for compatibility, display, or migration.
+
+The primary external-account mapping should be `user_coding_profiles`, because it supports multiple platforms and richer sync metadata.
+
+---
+
+## 13.3 `problems`
+
+The existing problem table can support LeetCode joins by slug or LeetCode number.
+
+The submission table should not depend on this join during ingestion. It should store enough problem metadata on the submission row itself.
+
+---
+
+## 13.4 `user_solved_problems`
+
+This table can remain as a solved-status table.
+
+It can optionally be updated from accepted submissions after full sync.
+
+It should not become the main corpus because it cannot store:
+
+- failed attempts,
+- multiple attempts,
+- submitted code,
+- runtime,
+- memory,
+- language,
+- testcase details,
+- compile/runtime errors.
+
+---
+
+## 13.5 LeetCode Summary Tables
+
+Existing LeetCode profile, topic, and contest summary tables can remain useful for dashboard views.
+
+The new submission corpus can eventually refresh, validate, or enrich those summaries.
+
+---
+
+# 14. AI Data Usage
+
+The AI layer should use the CrackedIn database instead of calling external platforms directly.
+
+The main AI input table will be `user_coding_submissions`.
+
+It provides:
 
 | Data type | Examples |
 |---|---|
 | Code history | Every submitted code snapshot |
 | Attempt history | Multiple attempts per problem |
 | Failure patterns | WA, TLE, RE, CE, MLE |
-| Topic patterns | Arrays, DP, graph, linked list, etc. |
+| Topic patterns | Arrays, DP, graph, linked list |
 | Difficulty patterns | Easy, Medium, Hard |
-| Language usage | C++, Java, Python, etc. |
+| Language usage | C++, Java, Python, JavaScript |
 | Performance data | Runtime, memory, percentiles |
 | Timeline data | Submission timestamps |
-| Improvement data | Failed attempt before accepted solution |
+| Improvement data | Failed attempts before accepted attempts |
 | Stuck problems | Tried but never accepted |
-| Fresh activity | Live-captured recent submissions |
+| Recent activity | Live-captured submissions |
 
-The AI layer should not need to call LeetCode directly. It should consume the normalized CrackedIn database.
+This report does not define the recommendation algorithm. It defines the data structure required to support future recommendations.
 
-The database should give the AI enough information to answer questions such as:
+The AI should be able to ask structured questions such as:
 
-- What has this user solved?
-- What has this user failed repeatedly?
-- Which topics cause the most wrong answers?
-- Which problems required many attempts?
-- How did the user's code change before acceptance?
-- Which language does the user perform best in?
-- What recently changed in the user's activity?
-- Which submissions should be reviewed next?
-
-This report does not define the recommendation algorithm. It defines the storage structure that makes those recommendations possible.
+- What has this user submitted recently?
+- Which topics have the most failed attempts?
+- Which problems took many attempts before acceptance?
+- Which language does the user use most?
+- Which accepted submissions should be reviewed?
+- Which failed submissions are still unresolved?
+- What code did the user write for a specific problem?
+- How did the user's code evolve across attempts?
 
 ---
 
-# 14. Recommended Indexing Strategy
+# 15. Recommended Indexing Strategy
 
-For MVP, indexes should support the most common user-level and submission-level reads.
+The following indexes are recommended for MVP.
 
-Recommended indexed fields:
+## 15.1 `user_coding_profiles`
 
-| Field or combination | Why |
+| Index | Purpose |
 |---|---|
-| `user_coding_profiles.user_id` | Get all connected platforms for user |
-| `user_coding_profiles.platform + platform_user_id` | Find external account |
-| `user_coding_submissions.user_id` | Get all user submissions |
-| `user_coding_submissions.coding_profile_id` | Get submissions for one external profile |
-| `user_coding_submissions.platform + platform_submission_id` | Prevent duplicates and upsert safely |
-| `user_coding_submissions.problem_slug` | Show problem history |
-| `user_coding_submissions.verdict` | Analyze accepted/failed patterns |
-| `user_coding_submissions.language` | Analyze language usage |
-| `user_coding_submissions.submitted_at` | Timeline and recency |
-| `user_coding_submissions.capture_source` | Debug sync source |
+| `user_id` | Fetch all connected coding profiles for a user |
+| `platform + platform_user_id` | Find an external account |
+| `platform + platform_username` | Find or reconnect a platform profile |
+| `sync_status` | Find profiles needing sync/retry |
 
-The most important unique index is:
+## 15.2 `user_coding_submissions`
 
-| Unique key | Purpose |
+| Index | Purpose |
 |---|---|
-| `platform + platform_submission_id` | One canonical row per external submission |
+| `user_id` | Fetch all submissions for a user |
+| `coding_profile_id` | Fetch all submissions for one connected profile |
+| `platform + platform_submission_id` | Enforce uniqueness and safe upsert |
+| `problem_slug` | Fetch all attempts for one problem |
+| `verdict` | Analyze accepted vs failed attempts |
+| `language` | Analyze language usage |
+| `submitted_at` | Timeline and recent-activity queries |
+| `capture_source` | Debug historical/live/delta ingestion |
+
+The most important uniqueness rule is:
+
+```text
+platform + platform_submission_id
+```
 
 ---
 
-# 15. Data Retention and Privacy Notes
+# 16. Data Retention, Privacy, and Controls
 
-Because the selected MVP stores all historical code, privacy controls matter.
+Because CrackedIn stores code, the data should be treated as sensitive user data.
 
 The schema should support:
 
-| Requirement | Schema support |
+| User control | Required database behavior |
 |---|---|
-| Disconnect platform | `user_coding_profiles.is_connected` |
-| Pause sync | `user_coding_profiles.sync_enabled` |
+| Disconnect platform | Update `user_coding_profiles.is_connected` |
+| Pause sync | Update `user_coding_profiles.sync_enabled` |
+| Resume sync | Continue from `sync_cursor` |
 | Delete imported data | Delete rows by `user_id` and/or `coding_profile_id` |
-| Export data | Query submissions by `user_id` |
-| Audit source | `capture_source`, timestamps, raw sanitized metadata |
-| Avoid credential storage | Do not store cookies, passwords, or raw request headers |
+| Export data | Query profile and submissions by `user_id` |
+| Audit source | Use `capture_source`, timestamps, and sanitized raw metadata |
 
-Code is sensitive user data. It should be treated as part of the user's private CrackedIn corpus.
+The system should not store:
+
+- LeetCode passwords,
+- LeetCode cookies,
+- raw browser request headers,
+- unrelated network traffic,
+- unrelated page HTML.
+
+Only user-authorized coding data should be stored.
 
 ---
 
-# 16. Migration Plan
+# 17. Migration Plan
 
-The migration should be additive.
-
-No current table needs to be removed.
+The migration should be additive and low risk.
 
 ## Step 1: Add `user_coding_profiles`
 
-Create the external coding-account connection layer.
+Add the connected coding-profile table.
 
 ## Step 2: Add `user_coding_submissions`
 
-Create the submission corpus layer.
+Add the full submission corpus table.
 
-## Step 3: Map Existing LeetCode Username
+## Step 3: Backfill Existing LeetCode Username Where Available
 
-For users with an existing `users.leetcode_username`, CrackedIn can optionally create a `user_coding_profiles` row for LeetCode.
+For users who already have a LeetCode username stored on their CrackedIn profile, optionally create a LeetCode coding-profile row when they connect or sync.
 
-## Step 4: Update Extension Ingestion
+## Step 4: Add Backend Ingestion Endpoints
 
-The extension should write to the new tables through backend APIs.
+The extension should send cleaned data to backend endpoints that create/update profile and submission records.
 
 ## Step 5: Keep Existing Summary Tables
 
-Existing summary tables should continue to support dashboards and legacy flows.
+Existing solved-problem and profile-summary flows should keep working.
 
-## Step 6: Gradually Move Analytics to the New Corpus
+## Step 6: Gradually Move AI Features to the New Corpus
 
-New AI features should query `user_coding_submissions`.
+New AI features should read from `user_coding_submissions`.
 
-Existing solved-problem/profile summary features can remain as they are until replaced.
+Existing dashboards can be migrated gradually.
 
 ---
 
-# 17. Future Normalization Path
+# 18. Future Expansion
 
-The two-table model is enough for MVP, but it should be designed so future normalization is easy.
+The two-table structure is the starting model for the coding corpus.
 
-Possible future tables:
+When needed, CrackedIn can add specialized tables such as:
 
-| Future table | When to add |
+| Future table | Purpose |
 |---|---|
-| `coding_problems` | When multi-platform problem normalization becomes important |
-| `user_coding_submission_code` | When code blobs become too large for main submission table |
-| `coding_sync_runs` | When detailed sync observability is needed |
-| `coding_analysis_cache` | When AI summaries need caching |
-| `coding_platform_events` | When event-level live capture debugging is needed |
+| `coding_problems` | Normalize problem metadata across platforms |
+| `user_coding_submission_code` | Move large code blobs out of the main submission table |
+| `coding_sync_runs` | Track every sync job and batch |
+| `coding_analysis_cache` | Cache expensive AI summaries |
+| `coding_platform_events` | Store low-level live-capture/debug events |
 
-The MVP should not start with these unless a clear performance or product need appears.
+These should be introduced only when they solve a real product, performance, or observability problem.
 
 ---
 
-# 18. Final Recommendation
+# 19. Final Recommendation
 
-CrackedIn should add two tables for MVP:
+CrackedIn should implement the coding-corpus database layer with:
 
 1. `user_coding_profiles`
 2. `user_coding_submissions`
 
-This design is the right balance between speed, flexibility, and future scalability.
+This gives the product a practical, extensible foundation for:
 
-It integrates cleanly with the existing CrackedIn `users` table, complements the existing LeetCode profile and solved-problem tables, and gives the AI layer access to the full code-submission corpus.
+- full LeetCode historical sync,
+- all historical code storage,
+- future live submission capture,
+- periodic repair of missed submissions,
+- platform expansion,
+- AI-ready user coding analysis.
 
-The core design principle is:
+The final implementation principle is:
 
-> Keep CrackedIn's current user system as the source of truth, attach external coding profiles to it, and store every coding attempt as a normalized submission record.
-
-This gives the product enough structure to support full LeetCode historical sync, live future capture, periodic repair, and later expansion into GFG, Codeforces, code courses, and internal CrackedIn practice environments.
+> CrackedIn's existing user remains the parent identity. Each external coding account becomes a connected profile. Every submitted attempt becomes a submission record. The AI layer reads from the stored CrackedIn corpus, not directly from external coding platforms.
