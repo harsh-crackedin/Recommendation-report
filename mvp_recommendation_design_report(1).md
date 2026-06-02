@@ -8,10 +8,6 @@ This report defines the MVP architecture for a recommendation system that uses S
 2. Build derived progress tables from those events.
 3. Serve recommendations from fast, query-friendly read models.
 
-The report is intentionally focused on design rather than implementation. It does not prescribe exact scoring logic, exact recommendation formulas, or SQL migrations. Instead, it defines what each database layer owns, how the layers relate to each other, which existing tables should be reused, which missing tables should be added, and how the recommendation system should treat source-of-truth data versus rebuildable derived data.
-
-The MVP should remain Supabase/Postgres-only. No external event broker, feature store, cache, or streaming platform is required for the current phase.
-
 ---
 
 ## 2. High-Level Architecture
@@ -53,7 +49,7 @@ This gives the product the main benefits of event-based design without overengin
 
 ### 3.1 Supabase Postgres is the only required database layer
 
-All MVP data should live in Supabase Postgres. The system should not require any external broker or external state system. Events can be stored as normal append-only Postgres rows, and read models can be normal Postgres tables.
+The system should not require any external broker or external state system. Events can be stored as normal append-only Postgres rows, and read models can be normal Postgres tables.
 
 ### 3.2 Events represent facts that happened
 
@@ -116,6 +112,14 @@ For MVP, the recommendation logic can be simple:
 - Avoid repeatedly showing recently skipped recommendations.
 
 The architecture should support this without requiring the logic to be final.
+
+### 3.6 Request-time work must stay bounded
+
+Recommendation serving should not depend on scanning raw event history during normal user requests. The request path should read from precomputed read models, especially `app.user_active_recommendations`, and only join the minimum catalog metadata required for display.
+
+Heavy work such as processing new submissions, recalculating topic progress, rebuilding derived state, expiring stale recommendations, or generating new ranked recommendation sets should be handled outside the direct user-facing read path.
+
+This principle keeps the architecture reliable as usage grows because the most frequent operation, reading recommendations, remains predictable and query-friendly.
 
 ---
 
@@ -1209,47 +1213,247 @@ User has sufficient Array coverage and is ready to move into Two Pointers or Sli
 
 ## 16. Recommended Index Intent
 
-This section describes index intent, not exact migration SQL.
+This section describes index intent, not exact migration SQL. Indexes are a required part of the design because the recommendation system depends on frequent user-scoped reads and append-heavy event writes.
+
+The most important design rule is that every recurring query path should have an index that begins with the most selective and most frequently filtered field. For user-specific recommendation features, this usually means indexes that start with `user_id`.
 
 ### Event log read indexes
 
-Needed for reading recent events and projecting by user:
+Needed for reading recent events, projecting events incrementally, and rebuilding per-user state:
 
 ```text
 user_data.user_coding_submissions(user_id, ts)
+user_data.user_coding_submissions(user_id, platform, slug)
 user_data.user_coding_submissions(platform, slug)
+user_data.user_coding_submissions(ts)
 app.pt_learning_events(user_id, created_at)
+app.pt_learning_events(user_id, topic_id, created_at)
 app.pt_learning_events(topic_id, created_at)
 app.recommendation_events(user_id, created_at)
+app.recommendation_events(user_id, event_type, created_at)
+app.recommendation_events(recommendation_id)
 ```
+
+Design notes:
+
+- The event tables should support both user-level replay and incremental processing.
+- Querying event logs by only `created_at` should be reserved for operational/backfill jobs, not normal request paths.
+- Event table indexes should be kept intentional because every index increases write cost.
+
+### Projection cursor indexes
+
+Needed if the system uses `app.recommendation_projection_state` or any equivalent cursor table:
+
+```text
+app.recommendation_projection_state(projection_name)
+app.recommendation_projection_state(last_processed_event_id)
+app.recommendation_projection_state(status, updated_at)
+```
+
+Design notes:
+
+- Projection state must allow the worker to resume from the last confirmed checkpoint.
+- If multiple projection jobs exist, `projection_name` should uniquely identify each projection.
+- Projection state should not be used as user-facing product state.
 
 ### Catalog join indexes
 
-Needed for mapping problems to topics:
+Needed for mapping problems to topics and enriching recommendations with display metadata:
 
 ```text
 catalog.coding_problems(platform, slug)
+catalog.coding_problems(difficulty)
 catalog.topics(slug)
+catalog.topics(parent_id)
 catalog.problem_topics(topic_id)
 catalog.problem_topics(platform, slug)
+catalog.problem_topics(topic_id, platform, slug)
 ```
+
+Design notes:
+
+- `catalog.problem_topics` should be optimized in both directions: topic to problem and problem to topic.
+- Topic hierarchy lookups should be supported by indexing `parent_id`.
+- Difficulty-based filtering should be indexed only if recommendations commonly filter by difficulty.
 
 ### Read-model serving indexes
 
-Needed for fast recommendations:
+Needed for fast recommendations and progress views:
 
 ```text
 user_data.user_coding_problems(user_id, status)
 user_data.user_coding_problems(user_id, latest_ac_at)
+user_data.user_coding_problems(user_id, platform, slug)
 app.pt_user_topic_progress(user_id, next_revision_at)
 app.pt_user_topic_progress(user_id, coverage_score)
+app.pt_user_topic_progress(user_id, status)
+app.pt_user_topic_progress(user_id, topic_id)
 app.user_active_recommendations(user_id, status, expires_at)
 app.user_active_recommendations(user_id, score)
+app.user_active_recommendations(user_id, recommendation_type, score)
+app.user_active_recommendations(user_id, topic_id)
+app.user_active_recommendations(user_id, platform, slug)
 ```
+
+Design notes:
+
+- `app.user_active_recommendations` is the primary serving table and must be optimized for user-specific ranked reads.
+- Expired or inactive recommendations should be filtered efficiently.
+- Topic progress should support both progress-bar reads and due-revision reads.
+
+### Uniqueness and deduplication constraints
+
+The design should prevent duplicate active state while still allowing append-only history.
+
+Recommended uniqueness intent:
+
+```text
+catalog.topics(slug) unique
+catalog.problem_topics(platform, slug, topic_id) unique
+user_data.user_coding_submissions(platform, submission_id) unique or primary key
+user_data.user_coding_problems(user_id, platform, slug) unique
+app.pt_user_topic_progress(user_id, topic_id) unique
+app.user_active_recommendations(user_id, recommendation_type, topic_id, platform, slug) unique where status is active
+```
+
+Design notes:
+
+- Event tables may have unique event identifiers, but they should still be append-only.
+- Read models should use upserts or deterministic replacement rules to prevent duplicate active rows.
+- Uniqueness should be designed around the product meaning of duplicate recommendations, not just database convenience.
 
 ---
 
-## 17. How the Design Handles Rebuilds
+## 17. Production Guardrails for the MVP
+
+These guardrails are part of the design and should be treated as architectural requirements, not optional implementation details. They keep the Supabase/Postgres-only approach reliable while preserving the simplicity of the MVP.
+
+### 17.1 Recommendation serving must use precomputed read models
+
+The normal recommendation API should read from `app.user_active_recommendations` and join only the catalog fields needed for display. It should not calculate recommendations by scanning raw event logs during each request.
+
+Allowed request-time work:
+
+- Read active recommendations for the current user.
+- Filter by active status and expiration.
+- Join topic/problem display metadata.
+- Record a lightweight `shown` event when appropriate.
+
+Avoid request-time work:
+
+- Full submission history scans.
+- Full topic-progress recomputation.
+- Rebuilding all user recommendations.
+- Large aggregation queries across event logs.
+- Updating many unrelated users in the same request.
+
+### 17.2 Event processing must be incremental and idempotent
+
+The projector/progress builder should process only new or affected events during normal operation. It should not recompute a user's full history after every event unless the event type explicitly requires it.
+
+The projector should be idempotent, meaning the same event can be processed more than once without corrupting derived state. This can be achieved through deterministic upserts, processed-event tracking, or a projection cursor.
+
+Design requirements:
+
+- Each event must have a stable event identity.
+- Projection jobs must record safe progress after successful processing.
+- Failed projection runs must be retryable.
+- Duplicate processing must not double-count attempts, solves, readiness deltas, or recommendation interactions.
+- Rebuild jobs must be separated from normal incremental processing.
+
+### 17.3 Derived table updates must be bounded
+
+A single new user event should update only the affected user, problem, topic, and recommendation rows.
+
+Expected normal update scope:
+
+```text
+new submission event
+        -> affected user problem row
+        -> affected topic progress rows
+        -> affected active recommendation rows for that user
+```
+
+The design should avoid global updates during normal user activity. Global recalculation should be reserved for controlled rebuilds, backfills, scoring changes, or scheduled maintenance.
+
+### 17.4 Active recommendations must expire or be replaced
+
+`app.user_active_recommendations` should not grow without bounds. Active recommendations are serving state, not permanent history.
+
+Design requirements:
+
+- Every active recommendation should have a status and/or expiration timestamp.
+- Old active recommendations should be expired, replaced, or deleted.
+- The system should limit the number of active recommendations per user.
+- Recommendation history should live in `app.recommendation_events`, not in unlimited active rows.
+
+Suggested active-state rule:
+
+```text
+Keep a small ranked set of active recommendations per user.
+Use app.recommendation_events for historical behavior.
+Regenerate or refresh active rows after meaningful user activity or scheduled refresh.
+```
+
+### 17.5 Event tables need a growth strategy
+
+Append-only tables will grow continuously. That is acceptable, but the design must define how large event tables remain usable.
+
+Guardrails:
+
+- Avoid unbounded event-log queries in user-facing paths.
+- Keep event indexes focused on real access patterns.
+- Monitor table size, index size, and slow queries.
+- Consider time-based partitioning when event tables become large enough that maintenance or query performance is affected.
+- Keep derived tables compact and current so event logs are not used as serving tables.
+
+Partitioning is not required on day one, but the schema should avoid assumptions that make future partitioning difficult.
+
+### 17.6 Backfills and rebuilds must be controlled operations
+
+Rebuilds are useful because derived tables are intentionally rebuildable, but they should not compete with normal user-facing reads and writes.
+
+Design requirements:
+
+- Rebuilds should run as explicit maintenance/backfill jobs.
+- Rebuilds should process data in batches.
+- Rebuilds should support resume/retry behavior.
+- Rebuilds should write to temporary or isolated derived state where practical before replacing live rows.
+- The system should record when a rebuild started, finished, failed, and which scoring/version logic was used.
+
+### 17.7 Database connections must be managed deliberately
+
+The API, background workers, and any admin/backfill jobs should not open uncontrolled database connections. The design should assume connection usage is a shared resource.
+
+Guardrails:
+
+- Use connection pooling where available.
+- Keep transactions short.
+- Avoid long-running transactions in user-facing code.
+- Separate heavy maintenance jobs from normal request handling.
+- Limit worker concurrency based on database capacity, not just application server capacity.
+
+### 17.8 Observability is part of the design
+
+The MVP should expose enough operational visibility to know whether projections and recommendation serving are healthy.
+
+Minimum signals to monitor:
+
+- Slow recommendation queries.
+- Event ingestion rate.
+- Projection lag.
+- Failed projection jobs.
+- Event table growth.
+- Active recommendation row count.
+- Expired recommendation cleanup.
+- Duplicate event or duplicate active recommendation conflicts.
+- Database connection usage.
+
+These signals do not require a complex observability platform for MVP, but the system should at least make them measurable through logs, database queries, or lightweight admin views.
+
+---
+
+## 18. How the Design Handles Rebuilds
 
 A rebuild means derived read models are recalculated from source events and catalog data.
 
@@ -1283,7 +1487,7 @@ If progress and recommendation tables are derived from events, the system can re
 
 ---
 
-## 18. Design Boundaries and Non-Goals for MVP
+## 19. Design Boundaries and Non-Goals for MVP
 
 ### In scope
 
@@ -1308,7 +1512,7 @@ If progress and recommendation tables are derived from events, the system can re
 
 ---
 
-## 19. Recommended MVP Schema Creation Plan
+## 20. Recommended MVP Schema Creation Plan
 
 This is a design-order plan, not migration SQL.
 
@@ -1374,55 +1578,83 @@ Purpose:
 
 ---
 
-## 20. Recommended MVP Read Path
+## 21. Recommended MVP Read Path
 
 The recommendation API should usually follow this path:
 
 ```text
 1. Receive user_id.
 2. Read active rows from app.user_active_recommendations.
-3. Join catalog.topics for topic display metadata.
-4. Join catalog.coding_problems for question display metadata.
-5. Return ranked recommendations.
-6. Log app.recommendation_events event_type = 'shown' if appropriate.
+3. Filter rows by status, expiration, and recommendation context.
+4. Join catalog.topics for topic display metadata.
+5. Join catalog.coding_problems for question display metadata.
+6. Return ranked recommendations.
+7. Log app.recommendation_events event_type = 'shown' if appropriate.
 ```
 
 This keeps the read path simple and fast.
 
-The API should not normally scan all submissions, all learning events, or all user history on every recommendation request.
+The API should not normally scan all submissions, all learning events, or all user history on every recommendation request. It should also avoid rebuilding recommendations during the read request unless there is no active recommendation state available and the fallback is explicitly bounded.
+
+Recommended fallback behavior:
+
+```text
+If no active recommendations exist:
+    return an empty state or a small deterministic fallback from catalog/progress tables
+    enqueue or trigger a bounded refresh for that user
+    do not perform a full historical recomputation inside the request
+```
 
 ---
 
-## 21. Recommended MVP Write Path
+## 22. Recommended MVP Write Path
 
 ### Submission write path
 
 ```text
 1. Insert into user_data.user_coding_submissions.
-2. Update/recompute user_data.user_coding_problems.
-3. Update/recompute app.pt_user_topic_progress.
-4. Refresh app.user_active_recommendations.
+2. Update only the affected user_data.user_coding_problems row.
+3. Update only the affected app.pt_user_topic_progress rows.
+4. Refresh, expire, or replace only the affected user's active recommendations.
+5. Record projection progress after successful derived updates.
 ```
+
+Design guardrail:
+
+- A normal submission should not trigger a global recompute.
+- Full user-history recomputation should be reserved for explicit rebuilds or backfills.
 
 ### Learning event write path
 
 ```text
 1. Insert into app.pt_learning_events.
-2. Update/recompute app.pt_user_topic_progress.
-3. Refresh app.user_active_recommendations.
+2. Update only the affected topic progress row for that user.
+3. Refresh, expire, or replace only the affected user's active recommendations.
+4. Record projection progress after successful derived updates.
 ```
+
+Design guardrail:
+
+- The event insert is the durable fact.
+- Derived progress changes must be retryable and idempotent.
 
 ### Recommendation interaction write path
 
 ```text
 1. Insert into app.recommendation_events.
-2. Update/expire/snooze app.user_active_recommendations.
+2. Update/expire/snooze matching rows in app.user_active_recommendations.
 3. Optionally update topic progress if the interaction represents learning behavior.
+4. Prevent duplicate active recommendations through deterministic replacement rules.
 ```
+
+Design guardrail:
+
+- Recommendation interaction history belongs in `app.recommendation_events`.
+- Active recommendation rows should remain compact serving state.
 
 ---
 
-## 22. Key Design Decisions
+## 23. Key Design Decisions
 
 ### Decision 1: Keep submissions as event source
 
@@ -1476,7 +1708,7 @@ Reason:
 
 ---
 
-## 23. Potential Risks and Design Responses
+## 24. Potential Risks and Design Responses
 
 ### Risk 1: Topic taxonomy is missing or inconsistent
 
@@ -1538,7 +1770,7 @@ Treat `app.user_active_recommendations` as rebuildable serving state and preserv
 
 ---
 
-## 24. Final MVP Architecture Summary
+## 25. Final MVP Architecture Summary
 
 The MVP should use a Supabase Postgres event-plus-read-model architecture.
 
