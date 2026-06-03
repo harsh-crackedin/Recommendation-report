@@ -7,7 +7,9 @@ We are building the first version of a hybrid recommendation system for coding p
 The system will recommend LeetCode questions to users based on:
 
 - Their historical LeetCode submissions
-- Their newly accepted LeetCode submissions
+- Their newly synced LeetCode submissions
+- Their accepted and failed submission patterns
+- The number of attempts made for a problem or topic
 - Their interaction with previous recommendations
 - A curated internal DSA sheet created by us
 
@@ -69,7 +71,7 @@ The source fields can store where the problem was taken from, such as:
 - Blind 75
 - Internal curated sheet
 
-This curated sheet acts as the recommendation pool.
+This curated sheet acts as the controlled recommendation pool.
 
 ---
 
@@ -81,15 +83,35 @@ The extension can extract:
 
 - Historical LeetCode submissions
 - New submissions made after the extension is installed
-- Submission status, such as Accepted or Failed
+- Accepted submissions
+- Failed submissions
+- Time limit errors
+- Runtime errors
+- Wrong answers
+- Other non-accepted verdicts
 - Submitted code
 - Problem metadata
 - Problem title and slug
 - Difficulty and other available metadata
 
+The system will not import only accepted code. It will import every available submission attempt, including accepted and failed submissions.
+
 For example, if a user has 500 past LeetCode submissions, the extension will import those submissions and store them in the backend database.
 
-This gives the backend enough data to understand the user's solved problems, attempted problems, recent activity, and coding history.
+This gives the backend enough data to understand:
+
+- Which problems the user solved
+- Which problems the user attempted
+- Which problems the user failed
+- How many times the user attempted each problem
+- How many times the user got accepted for each problem
+- How many times the user failed for each problem
+- Which topics have repeated failed attempts
+- Which topics have strong accepted history
+- What code was submitted for each attempt
+- When the submissions happened
+
+This submission history is a major input signal for the recommendation system.
 
 ---
 
@@ -105,11 +127,19 @@ Batch processing will be used for historical or grouped analysis.
 
 Event-based processing will be used for new activity and recommendation interactions.
 
+The system will use both accepted and failed submissions as recommendation signals.
+
+Accepted submissions help identify solved areas and user strengths.
+
+Failed submissions help identify weak problems, weak topics, and areas where the user needs more practice.
+
 ---
 
 ## 5. Historical Backfill Flow
 
 When a user connects the extension for the first time, the system will import the user's historical LeetCode submissions.
+
+This historical import includes all available submission attempts, not just accepted submissions.
 
 After the historical import is complete, a first processing task will run.
 
@@ -119,18 +149,30 @@ This first processing task will analyze approximately:
 50-60 past accepted submissions
 ```
 
-The purpose of this processing task is to understand the user's existing strengths, solved topics, and practice history.
+The accepted submissions are used to understand the user's confirmed solved history and topic exposure.
 
-After processing the historical accepted submissions, the system will generate the first set of active recommendations.
+The system can also use failed submission counts from the historical backfill to identify weak topics.
+
+For example:
+
+```text
+User attempted multiple Dynamic Programming problems.
+Many of those attempts failed before acceptance.
+The system can treat Dynamic Programming as a weaker topic.
+```
+
+The purpose of the first processing task is to understand the user's existing strengths, solved topics, failed patterns, and practice history.
+
+After processing the historical submissions, the system will generate the first set of active recommendations.
 
 Flow:
 
 ```text
 Extension imports historical LeetCode submissions
         ↓
-Backend stores submissions and code
+Backend stores all submissions and code
         ↓
-Batch processor analyzes 50-60 accepted submissions
+Batch processor analyzes accepted submissions and failed-attempt patterns
         ↓
 Processor compares user history with curated DSA sheet
         ↓
@@ -141,49 +183,93 @@ Recommendations are stored for frontend use
 
 ---
 
-## 6. Live Submission Flow
+## 6. Live Submission Sync Flow
 
 After the initial backfill, the extension will continue tracking new LeetCode submissions.
 
 When the user clicks submit on LeetCode and receives the server response, the extension will detect the result.
 
-If the submission is accepted, the extension will send the submission data to the backend.
+The system will sync every submitted code attempt, including:
+
+- Accepted
+- Wrong Answer
+- Time Limit Exceeded
+- Runtime Error
+- Compilation Error
+- Other failed verdicts
 
 The backend will store:
 
 - Submitted code
 - Problem slug
 - Problem title
-- Submission status
+- Submission status/verdict
 - Difficulty
 - Timestamp
+- Attempt metadata
 - Any other available metadata
 
-At the same time, a recommendation-related event will be stored in the recommendation event log.
+The live sync flow is not limited to accepted submissions.
 
-Then a backend processor will analyze the new accepted submission and generate or refresh recommendations from the curated DSA sheet.
+Every new submission attempt becomes useful behavioral data.
+
+Accepted submissions show progress.
+
+Failed submissions show struggle, repeated attempts, and possible weak topics.
 
 Flow:
 
 ```text
 User submits code on LeetCode
         ↓
-Extension detects accepted response
+Extension detects server response
+        ↓
+Extension sends accepted or failed submission to backend
         ↓
 Backend stores submission and code
         ↓
-Backend stores recommendation event
+Backend stores recommendation-processing event
         ↓
-Event processor analyzes the new submission
-        ↓
-Processor finds related questions from curated DSA sheet
-        ↓
-Processor refreshes active recommendations
+Processor uses the event to update recommendation state
 ```
 
 ---
 
-## 7. Recommendation Event Log
+## 7. Failed Submission Signals
+
+Failed submissions are important for recommendation quality.
+
+The system can use failed attempts to understand:
+
+- Which problems are difficult for the user
+- Which topics cause repeated failures
+- Whether the user eventually solved a problem after many attempts
+- Whether the user abandoned a problem after failed attempts
+- Which topic should be recommended for focused practice
+
+Example:
+
+```text
+User submits 7 times on a Dynamic Programming problem.
+Only 1 submission is accepted, or no accepted submission exists.
+The system can mark Dynamic Programming as an area that needs more practice.
+```
+
+The recommendation processor can use signals such as:
+
+- Attempt count
+- Accepted count
+- Failed count
+- Failure-to-accepted ratio
+- Recent failed submissions
+- Repeated failures within the same topic
+- Whether the user eventually solved the problem
+
+These signals can help generate recommendations from the curated DSA sheet.
+
+---
+
+## 8. Recommendation Event Log
 
 The table:
 
@@ -203,21 +289,75 @@ It stores recommendation-related events such as:
 - Recommendation completed
 - Recommendation expired
 
-This table is used to track the recommendation lifecycle and user interactions with recommendations.
+In addition to visible recommendation lifecycle events, this table will also store internal recommendation-processing events.
 
-For this MVP, this event log is important because it helps the system understand:
+These internal events can represent submission-driven processing, such as:
+
+- Historical submission processed
+- Live submission processed
+- Accepted submission processed
+- Failed submission processed
+- Batch recommendation generated
+- Event-based recommendation generated
+
+Some events in this table are user-visible lifecycle events.
+
+Other events are internal backend processing events and should not be shown to the user.
+
+The recommendation event log helps the system understand:
 
 - Which recommendations were shown
 - Which recommendations were skipped
 - Which recommendations were attempted
 - Which recommendations were completed
+- Which submissions triggered recommendation updates
+- Whether a recommendation came from historical batch processing or live event processing
 - Which recommendations should not be shown again immediately
 
-The recommendation event log is append-only. Old events should not be overwritten. New user actions should create new events.
+The recommendation event log is append-only. Old events should not be overwritten. New user actions or backend processing steps should create new events.
 
 ---
 
-## 8. Active Recommendation Table
+## 9. Event Visibility
+
+Not every recommendation event is meant to be shown to the user.
+
+Some events are only kept for backend processing, debugging, and recommendation history.
+
+For example:
+
+```text
+live_submission_processed
+historical_submission_processed
+batch_recommendation_generated
+event_recommendation_generated
+```
+
+These events are useful for the system but should not appear in the user interface.
+
+The system should maintain a way to distinguish:
+
+```text
+user-visible recommendation events
+internal recommendation-processing events
+```
+
+This can be handled through the event type or through metadata.
+
+Example metadata:
+
+```json
+{
+  "visibility": "internal",
+  "source": "live_submission_sync",
+  "submission_verdict": "Wrong Answer",
+  "processing_mode": "event"
+}
+```
+
+---
+
+## 10. Active Recommendation Table
 
 The table:
 
@@ -248,7 +388,7 @@ That batch process will analyze approximately:
 10-20 recent accepted submissions
 ```
 
-and generate more active recommendations for the user.
+The processor can also use recent failed submission patterns during this refresh.
 
 Flow:
 
@@ -261,14 +401,49 @@ Active recommendation count decreases
         ↓
 If active count falls below 5
         ↓
-Batch process analyzes recent accepted submissions
+Batch process analyzes recent accepted submissions and failed-attempt signals
         ↓
 New recommendations are inserted
 ```
 
 ---
 
-## 9. Frontend Interaction Flow
+## 11. Recommendation Generation Logic
+
+The recommendation processor uses several signals to generate recommendations:
+
+- Curated DSA sheet topic grouping
+- Existing LeetCode problem catalog
+- Historical accepted submissions
+- Historical failed submissions
+- Live accepted submissions
+- Live failed submissions
+- Number of attempts per problem
+- Number of accepted submissions per problem
+- Number of failed submissions per problem
+- Topic-level failure patterns
+- User's previous recommendation skips
+- User's previous recommendation attempts
+- Existing active recommendation count
+
+The processor should avoid recommending problems that:
+
+- The user has already solved confidently
+- The user recently skipped
+- Are already active recommendations
+- Are inactive in the curated DSA sheet
+
+The processor can prefer problems that:
+
+- Belong to weak topics
+- Come after recently solved problems in the curated sheet
+- Match topics with repeated failed submissions
+- Are from the curated DSA sheet
+- Have not been shown recently
+
+---
+
+## 12. Frontend Interaction Flow
 
 The frontend will show recommendations to the user.
 
@@ -297,7 +472,7 @@ The active recommendation can then be dismissed, expired, or removed from the ac
 
 ---
 
-## 10. Notification Generation
+## 13. Notification Generation
 
 The active recommendation table will contain enough information to generate user-facing recommendation notifications.
 
@@ -326,12 +501,12 @@ The recommendation decision should come from the backend recommendation processo
 Example notification:
 
 ```text
-You recently solved several Array problems. Try this Binary Search problem next to strengthen your search pattern recognition.
+You had multiple recent failed attempts in Dynamic Programming. Try this related problem next to strengthen that topic.
 ```
 
 ---
 
-## 11. Processing Cursor
+## 14. Processing Cursor
 
 The optional table:
 
@@ -355,7 +530,7 @@ This table is optional for the MVP but useful for reliability.
 
 ---
 
-## 12. Main Tables In Scope
+## 15. Main Tables In Scope
 
 The first step of the hybrid recommendation model uses these new tables:
 
@@ -372,7 +547,7 @@ There may be small schema changes later, but the current focus is the architectu
 
 ---
 
-## 13. Final Architecture Summary
+## 16. Final Architecture Summary
 
 The planned architecture is:
 
@@ -391,6 +566,8 @@ Frontend Recommendation UI
 
 Live LeetCode Submission
         ↓
+Submission Storage
+        ↓
 Recommendation Event Log
         ↓
 Event Processor
@@ -404,9 +581,12 @@ The system uses:
 
 ```text
 Historical backfill for first-time recommendations
-Live event processing for new accepted submissions
-Batch refresh when active recommendations fall below threshold
-Recommendation events to track lifecycle and interactions
+Live syncing for every submitted code attempt
+Batch processing for historical accepted submissions and failed-attempt patterns
+Event processing for new live submissions
+Failed submission counts as weakness signals
+Active recommendation thresholding
+Recommendation events to track both user-visible events and internal processing events
 Active recommendations as the serving layer for the frontend
 LLM only for notification text generation
 ```
@@ -414,9 +594,12 @@ LLM only for notification text generation
 The main idea is:
 
 ```text
-Store user activity and recommendation interactions as events.
+Store every user submission attempt.
+Use accepted submissions to identify progress.
+Use failed submissions to identify weak areas.
+Store recommendation lifecycle and processing events.
 Process historical data in batches.
-Process new accepted submissions as events.
+Process new submissions as events.
 Keep only a small active recommendation set ready for the frontend.
 Use the curated DSA sheet as the controlled recommendation pool.
 ```
